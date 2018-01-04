@@ -3,7 +3,7 @@ This crate provides a safe interface for reading and writing information to the 
 [![Current Version](https://img.shields.io/crates/v/sysctl.svg)](https://crates.io/crates/sysctl)
 
 
-*Currently only developed and tested on FreeBSD.*  
+*Currently developed and tested on FreeBSD and MacOS High Sierra.*  
 *Contributions for improvements and other platforms are welcome.*
 
 ### Documentation
@@ -53,6 +53,15 @@ fn main() {
     if let sysctl::CtlValue::Int(val) = val_enum {
         println!("Value: {}", val);
     }
+    
+    //Same output with fmt::Display
+    println!("Value: {}", val_enum);
+
+    //Get value to String
+    let val_str: String = val_enum.into();
+
+    //Same output as with fmt::Display
+    println!("String val: {}", val_str);
 }
 ```
 

@@ -66,6 +66,8 @@ use std::str;
 use std::f32;
 use errno::{errno, set_errno};
 use byteorder::{LittleEndian, ByteOrder, WriteBytesExt};
+use std::fmt;
+use std::string::String;
 
 // CTL* constants belong to libc crate but have not been added there yet.
 // They will be removed from here once in the libc crate.
@@ -200,6 +202,100 @@ pub enum CtlValue {
     U32(u32),
     #[cfg(not(target_os = "macos"))]
     Temperature(Temperature),
+}
+
+impl fmt::Display for CtlValue {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if let &CtlValue::Int(val) = self {
+            write!(f, "{}", val)
+        }
+        else if let &CtlValue::String(ref val_s) = self {
+           write!(f, "{}", val_s) 
+        } 
+        else if let &CtlValue::S64(val_s64) = self {
+            write!(f, "{}", val_s64)
+        }
+        else if let &CtlValue::Uint(val_uint) = self {
+            write!(f, "{}", val_uint)
+        }
+        else if let &CtlValue::Long(val_long) = self {
+            write!(f, "{}", val_long)
+        }
+        else if let &CtlValue::Ulong(val_ulong) = self {
+            write!(f, "{}", val_ulong)
+        }
+        else if let &CtlValue::U64(val_u64) = self {
+            write!(f, "{}", val_u64)
+        }
+        else if let &CtlValue::U8(val_u8) = self {
+            write!(f, "{}", val_u8)
+        }
+        else if let &CtlValue::U16(val_u16) = self {
+            write!(f, "{}", val_u16)
+        }
+        else if let &CtlValue::S8(val_s8) = self {
+            write!(f, "{}", val_s8)
+        }
+        else if let &CtlValue::S16(val_s16) = self {
+            write!(f, "{}", val_s16)
+        }
+        else if let &CtlValue::S32(val_s32) = self {
+            write!(f, "{}", val_s32)
+        }
+        else if let &CtlValue::U32(val_u32) = self {
+            write!(f, "{}", val_u32)
+        }
+        else {
+            write!(f, "{}", "unknown value format for Display. use {:?}")
+        }
+    }
+}
+
+impl convert::Into<String> for CtlValue {
+    fn into(self) -> String {
+        if let CtlValue::Int(val) = self {
+            val.to_string()
+        }
+        else if let CtlValue::String(val_s) = self {
+           val_s.to_string() 
+        } 
+        else if let CtlValue::S64(val_s64) = self {
+            val_s64.to_string()
+        }
+        else if let CtlValue::Uint(val_uint) = self {
+            val_uint.to_string()
+        }
+        else if let CtlValue::Long(val_long) = self {
+            val_long.to_string()
+        }
+        else if let CtlValue::Ulong(val_ulong) = self {
+            val_ulong.to_string()
+        }
+        else if let CtlValue::U64(val_u64) = self {
+            val_u64.to_string()
+        }
+        else if let CtlValue::U8(val_u8) = self {
+            val_u8.to_string()
+        }
+        else if let CtlValue::U16(val_u16) = self {
+            val_u16.to_string()
+        }
+        else if let CtlValue::S8(val_s8) = self {
+            val_s8.to_string()
+        }
+        else if let CtlValue::S16(val_s16) = self {
+            val_s16.to_string()
+        }
+        else if let CtlValue::S32(val_s32) = self {
+            val_s32.to_string()
+        }
+        else if let CtlValue::U32(val_u32) = self {
+            val_u32.to_string()
+        }
+        else {
+            String::from("unknown value format for Display. use {:?}")
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
