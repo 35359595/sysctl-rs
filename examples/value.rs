@@ -1,5 +1,5 @@
 extern crate sysctl;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn main() {
 
     let ctl = "kern.osrevision";
@@ -26,7 +26,7 @@ fn main() {
 }
 
 //MacOS value extraction
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn main() {
     let ctl = "kern.osrevision";
 

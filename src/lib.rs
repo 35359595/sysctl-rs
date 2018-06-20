@@ -5,7 +5,7 @@
 //! # Example: Get description and value
 //! ```
 //! extern crate sysctl;
-//! #[cfg(not(target_os = "macos"))]
+//! #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 //! fn main() {
 //!
 //!     let ctl = "kern.osrevision";
@@ -62,7 +62,7 @@ use std::convert;
 use std::mem;
 use std::ptr;
 use std::str;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 use std::f32;
 use errno::{errno, set_errno};
 use byteorder::{LittleEndian, ByteOrder, WriteBytesExt};
@@ -138,7 +138,7 @@ enum CtlType {
     S32 = 14,
     U32 = 15,
     // Added custom types below
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     Temperature = 16,
 }
 impl convert::From<u32> for CtlType {
@@ -165,7 +165,7 @@ impl<'a> convert::From<&'a CtlValue> for CtlType {
             &CtlValue::S16(_) => CtlType::S16,
             &CtlValue::S32(_) => CtlType::S32,
             &CtlValue::U32(_) => CtlType::U32,
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
             &CtlValue::Temperature(_) => CtlType::Temperature,
         }
     }
@@ -200,7 +200,7 @@ pub enum CtlValue {
     S16(i16),
     S32(i32),
     U32(u32),
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     Temperature(Temperature),
 }
 
@@ -304,7 +304,7 @@ struct CtlInfo {
     fmt: String,
     flags: u32,
 }
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 impl CtlInfo {
     fn is_temperature(&self) -> bool {
         match &self.fmt[0..2] {
@@ -319,7 +319,7 @@ impl CtlInfo {
 /// # Example
 /// ```
 /// extern crate sysctl;
-/// #[cfg(not(target_os = "macos"))]
+/// #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 /// fn main() {
 ///     let val_enum = sysctl::value("dev.cpu.0.temperature").unwrap();
 ///     if let sysctl::CtlValue::Temperature(val) = val_enum {
@@ -333,12 +333,12 @@ impl CtlInfo {
 /// }
 /// ```
 /// Not available on MacOS
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[derive(Debug, Copy, Clone, PartialEq, PartialOrd)]
 pub struct Temperature {
     value: f32, // Kelvin
 }
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 impl Temperature {
     pub fn kelvin(&self) -> f32 {
         self.value
@@ -358,7 +358,7 @@ fn errno_string() -> String {
     format!("errno {}: {}", code, e)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn name2oid(name: &str) -> Result<Vec<c_int>, String> {
 
     // Request command for OID
@@ -390,7 +390,7 @@ fn name2oid(name: &str) -> Result<Vec<c_int>, String> {
     Ok(res)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn name2oid(name: &str) -> Result<Vec<c_int>, String> {
 
     // Request command for OID
@@ -422,7 +422,7 @@ fn name2oid(name: &str) -> Result<Vec<c_int>, String> {
     Ok(res)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn oidfmt(oid: &[c_int]) -> Result<CtlInfo, String> {
 
     // Request command for type info
@@ -464,7 +464,7 @@ fn oidfmt(oid: &[c_int]) -> Result<CtlInfo, String> {
     Ok(s)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn temperature(info: &CtlInfo, val: &Vec<u8>) -> Result<CtlValue, String> {
     let prec: u32 = {
         match info.fmt.len() {
@@ -501,7 +501,7 @@ fn temperature(info: &CtlInfo, val: &Vec<u8>) -> Result<CtlValue, String> {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn oidfmt(oid: &[c_int]) -> Result<CtlInfo, String> {
 
     // Request command for type info
@@ -511,6 +511,16 @@ fn oidfmt(oid: &[c_int]) -> Result<CtlInfo, String> {
     // Store results here
     let mut buf: [c_uchar; BUFSIZ as usize] = [0; BUFSIZ as usize];
     let mut buf_len = mem::size_of_val(&buf);
+    #[cfg(target_os = "linux")]
+    let ret = unsafe {
+        sysctl(qoid.as_mut_ptr(),
+               qoid.len() as i32,
+               buf.as_mut_ptr() as *mut c_void,
+               &mut buf_len,
+               ptr::null_mut(),
+               0)
+    };
+    #[cfg(target_os = "macos")]
     let ret = unsafe {
         sysctl(qoid.as_mut_ptr(),
                qoid.len() as u32,
@@ -555,7 +565,7 @@ fn oidfmt(oid: &[c_int]) -> Result<CtlInfo, String> {
 ///     println!("Value: {:?}", sysctl::value("kern.osrevision"));
 /// }
 /// ```
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn value(name: &str) -> Result<CtlValue, String> {
     match name2oid(name) {
         Ok(v) => value_oid(&v),
@@ -563,7 +573,7 @@ pub fn value(name: &str) -> Result<CtlValue, String> {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn value(name: &str) -> Result<CtlValue, String> {
     match name2oid(name) {
         Ok(mut v) => value_oid(&mut v),
@@ -585,7 +595,7 @@ pub fn value(name: &str) -> Result<CtlValue, String> {
 ///     println!("Value: {:?}", sysctl::value_oid(&oid));
 /// }
 /// ```
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn value_oid(oid: &mut Vec<i32>) -> Result<CtlValue, String> {
 
     let info: CtlInfo = try!(oidfmt(&oid));
@@ -654,13 +664,23 @@ pub fn value_oid(oid: &mut Vec<i32>) -> Result<CtlValue, String> {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn value_oid(oid: &mut Vec<i32>) -> Result<CtlValue, String> {
 
     let info: CtlInfo = try!(oidfmt(&oid));
 
     // First get size of value in bytes
     let mut val_len = 0;
+    #[cfg(target_os = "linux")]
+    let ret = unsafe {
+        sysctl(oid.as_mut_ptr(),
+               oid.len() as i32,
+               ptr::null_mut(),
+               &mut val_len,
+               ptr::null_mut(),
+               0)
+    };
+    #[cfg(target_os = "macos")]
     let ret = unsafe {
         sysctl(oid.as_mut_ptr(),
                oid.len() as u32,
@@ -676,6 +696,16 @@ pub fn value_oid(oid: &mut Vec<i32>) -> Result<CtlValue, String> {
     // Then get value
     let mut val: Vec<c_uchar> = vec![0; val_len];
     let mut new_val_len = val_len;
+    #[cfg(target_os = "linux")]
+    let ret = unsafe {
+        sysctl(oid.as_mut_ptr(),
+               oid.len() as i32,
+               val.as_mut_ptr() as *mut c_void,
+               &mut new_val_len,
+               ptr::null_mut(),
+               0)
+    };
+    #[cfg(target_os = "macos")]
     let ret = unsafe {
         sysctl(oid.as_mut_ptr(),
                oid.len() as u32,
@@ -714,7 +744,7 @@ pub fn value_oid(oid: &mut Vec<i32>) -> Result<CtlValue, String> {
         CtlType::S16 => Ok(CtlValue::S16(LittleEndian::read_i16(&val))),
         CtlType::S32 => Ok(CtlValue::S32(LittleEndian::read_i32(&val))),
         CtlType::U32 => Ok(CtlValue::U32(LittleEndian::read_u32(&val))),
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         _ => Err("No matching type for value".into()),
     }
 }
@@ -746,7 +776,7 @@ pub fn value_oid(oid: &mut Vec<i32>) -> Result<CtlValue, String> {
 ///     println!("{:?}", sysctl::value_as::<ClockInfo>("kern.clockrate"));
 /// }
 /// ```
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn value_as<T>(name: &str) -> Result<Box<T>, String> {
     match name2oid(name) {
         Ok(v) => value_oid_as::<T>(&v),
@@ -754,7 +784,7 @@ pub fn value_as<T>(name: &str) -> Result<Box<T>, String> {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn value_as<T>(name: &str) -> Result<Box<T>, String> {
     match name2oid(name) {
         Ok(mut v) => value_oid_as::<T>(&mut v),
@@ -785,7 +815,7 @@ pub fn value_as<T>(name: &str) -> Result<Box<T>, String> {
 ///     profhz: c_int, /* profiling clock frequency */
 /// }
 ///
-/// #[cfg(not(target_os = "macos"))]
+/// #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 /// fn main() {
 ///     let oid = vec![libc::CTL_KERN, libc::KERN_CLOCKRATE];
 ///     println!("{:?}", sysctl::value_oid_as::<ClockInfo>(&oid));
@@ -847,7 +877,7 @@ pub fn value_oid_as<T>(oid: &mut Vec<i32>) -> Result<Box<T>, String> {
 ///     println!("{:?}", sysctl::set_value("hw.usb.debug", sysctl::CtlValue::Int(1)));
 /// }
 /// ```
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn set_value(name: &str, value: CtlValue) -> Result<CtlValue, String> {
 
     let oid = try!(name2oid(name));
@@ -887,7 +917,7 @@ pub fn set_value(name: &str, value: CtlValue) -> Result<CtlValue, String> {
     self::value(name)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn set_value(name: &str, value: CtlValue) -> Result<CtlValue, String> {
 
     let mut oid = try!(name2oid(name));
@@ -910,6 +940,16 @@ pub fn set_value(name: &str, value: CtlValue) -> Result<CtlValue, String> {
             .expect("Error parsing value to byte array");
 
         // Set value
+        #[cfg(target_os = "linux")]
+        let ret = unsafe {
+            sysctl(oid.as_mut_ptr(),
+                   oid.len() as i32,
+                   ptr::null_mut(),
+                   ptr::null_mut(),
+                   bytes.as_ptr() as *mut c_void,
+                   bytes.len())
+        };
+        #[cfg(target_os = "macos")]
         let ret = unsafe {
             sysctl(oid.as_mut_ptr(),
                    oid.len() as u32,
@@ -938,7 +978,7 @@ pub fn set_value(name: &str, value: CtlValue) -> Result<CtlValue, String> {
 ///     println!("Description: {:?}", sysctl::description("kern.osrevision"));
 /// }
 /// ```
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn description(name: &str) -> Result<String, String> {
 
     let oid: Vec<c_int> = try!(name2oid(name));
@@ -1009,7 +1049,7 @@ mod tests {
     use std::process::Command;
 
     #[test]
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     fn ctl_mib() {
         let oid = name2oid("kern.proc.pid").unwrap();
         assert_eq!(oid.len(), 3);
@@ -1060,6 +1100,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "linux"))]
     fn ctl_value_oid_int() {
         let output = Command::new("sysctl")
             .arg("-n")
@@ -1092,7 +1133,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     fn ctl_description() {
         let s: String = match description("hw.ncpu") {
             Ok(s) => s,
@@ -1101,7 +1142,7 @@ mod tests {
         assert_eq!(s, "8");
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     #[test]
     fn ctl_temperature_ik() {
         let info = CtlInfo {
@@ -1124,7 +1165,7 @@ mod tests {
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     #[test]
     fn ctl_temperature_ik3() {
         let info = CtlInfo {
