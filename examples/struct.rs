@@ -1,5 +1,5 @@
-extern crate sysctl;
 extern crate libc;
+extern crate sysctl;
 
 #[cfg(not(target_os = "macos"))]
 use libc::c_int;
@@ -11,7 +11,7 @@ use std::mem;
 #[repr(C)]
 #[cfg(not(target_os = "macos"))]
 struct ClockInfo {
-    hz: c_int, /* clock frequency */
+    hz: c_int,   /* clock frequency */
     tick: c_int, /* micro-seconds per hz tick */
     spare: c_int,
     stathz: c_int, /* statistics clock frequency */
@@ -19,14 +19,15 @@ struct ClockInfo {
 }
 #[cfg(not(target_os = "macos"))]
 fn main() {
+    let ctl = sysctl::Ctl::new("kern.clockrate").expect("could not get sysctl: kern.clockrate");
 
-    let ctl = "kern.clockrate";
-    println!("\nRead sysctl {} and parse result to struct ClockInfo", ctl);
+    let name = ctl.name().expect("could not get sysctl name");
+    println!("Read sysctl {} and parse result to struct ClockInfo", name);
 
-    let d = sysctl::description(ctl).unwrap();
+    let d = ctl.description().expect("could not get sysctl description");
     println!("Description: {:?}", d);
 
-    let val_enum = sysctl::value(ctl).unwrap();
+    let val_enum = ctl.value().expect("could not get sysctl value");
     println!("ClockInfo raw data: {:?}", val_enum);
 
     if let sysctl::CtlValue::Struct(val) = val_enum {
@@ -40,6 +41,4 @@ fn main() {
 }
 
 #[cfg(target_os = "macos")]
-fn main() {
-    
-}
+fn main() {}

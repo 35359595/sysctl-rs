@@ -7,23 +7,32 @@
 //! extern crate sysctl;
 //! #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 //! fn main() {
+//!     let ctl = sysctl::Ctl::new("kern.osrevision")
+//!         .expect("could not get sysctl");
 //!
-//!     let ctl = "kern.osrevision";
+//!     let d = ctl.description()
+//!         .expect("could not get description");
 //!
-//!     let d: String = sysctl::description(ctl).unwrap();
 //!     println!("Description: {:?}", d);
 //!
-//!     let val_enum = sysctl::value(ctl).unwrap();
+//!     let val_enum = ctl.value()
+//!         .expect("could not get value");
+//!
 //!     if let sysctl::CtlValue::Int(val) = val_enum {
 //!         println!("Value: {}", val);
 //!     }
 //! }
+//!
 //! #[cfg(target_os = "macos")]
 //! fn main() {
+//!     let mut ctl = sysctl::Ctl::new("kern.osrevision")
+//!         .expect("could not get sysctl");
 //!
-//!     let ctl = "kern.osrevision";
+//!     // description is not available on macos
 //!
-//!     let val_enum = sysctl::value(ctl).unwrap();
+//!     let val_enum = ctl.value()
+//!         .expect("could not get value");
+//!
 //!     if let sysctl::CtlValue::Int(val) = val_enum {
 //!         println!("Value: {}", val);
 //!     }
@@ -50,24 +59,30 @@
 //!     println!("{:?}", sysctl::value_as::<ClockInfo>("kern.clockrate"));
 //! }
 //! ```
-extern crate libc;
-extern crate byteorder;
-extern crate errno;
 
-use libc::{c_int, c_uint, c_uchar, c_void};
+#[macro_use]
+extern crate bitflags;
+extern crate byteorder;
+extern crate libc;
+
+#[macro_use]
+extern crate failure;
+
 use libc::sysctl;
 use libc::BUFSIZ;
+use libc::{c_int, c_uchar, c_uint, c_void};
 
+use byteorder::{ByteOrder, LittleEndian, WriteBytesExt};
+use std::cmp;
 use std::convert;
+#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+use std::f32;
+use std::io;
 use std::mem;
 use std::ptr;
 use std::str;
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-use std::f32;
-use errno::{errno, set_errno};
-use byteorder::{LittleEndian, ByteOrder, WriteBytesExt};
+use std::str::FromStr;
 use std::fmt;
-use std::string::String;
 
 // CTL* constants belong to libc crate but have not been added there yet.
 // They will be removed from here once in the libc crate.
@@ -79,7 +94,7 @@ pub const CTLTYPE_NODE: c_uint = 1;
 pub const CTLTYPE_INT: c_uint = 2;
 pub const CTLTYPE_STRING: c_uint = 3;
 pub const CTLTYPE_S64: c_uint = 4;
-pub const CTLTYPE_OPAQUE: c_uint = 5;
+pub const CTLTYPE_OPAQU: c_uint = 5;
 pub const CTLTYPE_STRUCT: c_uint = 5;
 pub const CTLTYPE_UINT: c_uint = 6;
 pub const CTLTYPE_LONG: c_uint = 7;
@@ -95,22 +110,23 @@ pub const CTLTYPE_U32: c_uint = 15;
 pub const CTLFLAG_RD: c_uint = 0x80000000;
 pub const CTLFLAG_WR: c_uint = 0x40000000;
 pub const CTLFLAG_RW: c_uint = 0x80000000 | 0x40000000;
-pub const CTLFLAG_ANYBODY: c_uint = 268435456;
-pub const CTLFLAG_SECURE: c_uint = 134217728;
-pub const CTLFLAG_PRISON: c_uint = 67108864;
-pub const CTLFLAG_DYN: c_uint = 33554432;
-pub const CTLFLAG_SKIP: c_uint = 16777216;
+pub const CTLFLAG_DORMANT: c_uint = 0x20000000;
+pub const CTLFLAG_ANYBODY: c_uint = 0x10000000;
+pub const CTLFLAG_SECURE: c_uint = 0x08000000;
+pub const CTLFLAG_PRISON: c_uint = 0x04000000;
+pub const CTLFLAG_DYN: c_uint = 0x02000000;
+pub const CTLFLAG_SKIP: c_uint = 0x01000000;
 pub const CTLFLAG_TUN: c_uint = 0x00080000;
-pub const CTLFLAG_RDTUN: c_uint = 2148007936;
-pub const CTLFLAG_RWTUN: c_uint = 3221749760;
-pub const CTLFLAG_MPSAFE: c_uint = 262144;
-pub const CTLFLAG_VNET: c_uint = 131072;
-pub const CTLFLAG_DYING: c_uint = 65536;
-pub const CTLFLAG_CAPRD: c_uint = 32768;
-pub const CTLFLAG_CAPWR: c_uint = 16384;
-pub const CTLFLAG_STATS: c_uint = 8192;
-pub const CTLFLAG_NOFETCH: c_uint = 4096;
-pub const CTLFLAG_CAPRW: c_uint = 49152;
+pub const CTLFLAG_RDTUN: c_uint = CTLFLAG_RD | CTLFLAG_TUN;
+pub const CTLFLAG_RWTUN: c_uint = CTLFLAG_RW | CTLFLAG_TUN;
+pub const CTLFLAG_MPSAFE: c_uint = 0x00040000;
+pub const CTLFLAG_VNET: c_uint = 0x00020000;
+pub const CTLFLAG_DYING: c_uint = 0x00010000;
+pub const CTLFLAG_CAPRD: c_uint = 0x00008000;
+pub const CTLFLAG_CAPWR: c_uint = 0x00004000;
+pub const CTLFLAG_STATS: c_uint = 0x00002000;
+pub const CTLFLAG_NOFETCH: c_uint = 0x00001000;
+pub const CTLFLAG_CAPRW: c_uint = CTLFLAG_CAPRD | CTLFLAG_CAPWR;
 pub const CTLFLAG_SECURE1: c_uint = 134217728;
 pub const CTLFLAG_SECURE2: c_uint = 135266304;
 pub const CTLFLAG_SECURE3: c_uint = 136314880;
@@ -118,10 +134,90 @@ pub const CTLFLAG_SECURE3: c_uint = 136314880;
 pub const CTLMASK_SECURE: c_uint = 15728640;
 pub const CTLSHIFT_SECURE: c_uint = 20;
 
+/// Represents control flags of a sysctl
+bitflags! {
+    pub struct CtlFlags : c_uint {
+        /// Allow reads of variable
+        const RD = CTLFLAG_RD;
 
+        /// Allow writes to the variable
+        const WR = CTLFLAG_WR;
+
+        const RW = Self::RD.bits | Self::WR.bits;
+
+        /// This sysctl is not active yet
+        const DORMANT = CTLFLAG_DORMANT;
+
+        /// All users can set this var
+        const ANYBODY = CTLFLAG_ANYBODY;
+
+        /// Permit set only if securelevel<=0
+        const SECURE = CTLFLAG_SECURE;
+
+        /// Prisoned roots can fiddle
+        const PRISON = CTLFLAG_PRISON;
+
+        /// Dynamic oid - can be freed
+        const DYN = CTLFLAG_DYN;
+
+        /// Skip this sysctl when listing
+        const SKIP = CTLFLAG_DORMANT;
+
+        /// Secure level
+        const SECURE_MASK = 0x00F00000;
+
+        /// Default value is loaded from getenv()
+        const TUN = CTLFLAG_TUN;
+
+        /// Readable tunable
+        const RDTUN = Self::RD.bits | Self::TUN.bits;
+
+        /// Readable and writeable tunable
+        const RWTUN = Self::RW.bits | Self::TUN.bits;
+
+        /// Handler is MP safe
+        const MPSAFE = CTLFLAG_MPSAFE;
+
+        /// Prisons with vnet can fiddle
+        const VNET = CTLFLAG_VNET;
+
+        /// Oid is being removed
+        const DYING = CTLFLAG_DYING;
+
+        /// Can be read in capability mode
+        const CAPRD = CTLFLAG_CAPRD;
+
+        /// Can be written in capability mode
+        const CAPWR = CTLFLAG_CAPWR;
+
+        /// Statistics; not a tuneable
+        const STATS = CTLFLAG_STATS;
+
+        /// Don't fetch tunable from getenv()
+        const NOFETCH = CTLFLAG_NOFETCH;
+
+        /// Can be read and written in capability mode
+        const CAPRW = Self::CAPRD.bits | Self::CAPWR.bits;
+    }
+}
+
+/// An Enum that represents a sysctl's type information.
+///
+/// # Example
+///
+/// ```
+/// extern crate sysctl;
+///
+/// let val_enum = &sysctl::value("kern.osrevision")
+///     .expect("could not get kern.osrevision sysctl");
+///
+/// let val_type: sysctl::CtlType = val_enum.into();
+///
+/// assert_eq!(val_type, sysctl::CtlType::Int);
+/// ```
 #[derive(Debug, Copy, Clone, PartialEq)]
 #[repr(u32)]
-enum CtlType {
+pub enum CtlType {
     Node = 1,
     Int = 2,
     String = 3,
@@ -138,18 +234,20 @@ enum CtlType {
     S32 = 14,
     U32 = 15,
     // Added custom types below
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    None = 0,
+    #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "linux"))]
     Temperature = 16,
 }
 impl convert::From<u32> for CtlType {
     fn from(t: u32) -> Self {
-        assert!(t >= 1 && t <= 16);
+        assert!(t <= 16);
         unsafe { mem::transmute(t) }
     }
 }
 impl<'a> convert::From<&'a CtlValue> for CtlType {
     fn from(t: &'a CtlValue) -> Self {
         match t {
+            &CtlValue::None => CtlType::None,
             &CtlValue::Node(_) => CtlType::Node,
             &CtlValue::Int(_) => CtlType::Int,
             &CtlValue::String(_) => CtlType::String,
@@ -165,8 +263,34 @@ impl<'a> convert::From<&'a CtlValue> for CtlType {
             &CtlValue::S16(_) => CtlType::S16,
             &CtlValue::S32(_) => CtlType::S32,
             &CtlValue::U32(_) => CtlType::U32,
-            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "linux"))]
             &CtlValue::Temperature(_) => CtlType::Temperature,
+        }
+    }
+}
+
+impl CtlType {
+    fn min_type_size(self: &Self) -> usize {
+        match self {
+            &CtlType::None => 0,
+            &CtlType::Node => 0,
+            &CtlType::Int => mem::size_of::<libc::c_int>(),
+            &CtlType::String => 0,
+            &CtlType::S64 => mem::size_of::<i64>(),
+            &CtlType::Struct => 0,
+            &CtlType::Uint => mem::size_of::<libc::c_uint>(),
+            &CtlType::Long => mem::size_of::<libc::c_long>(),
+            &CtlType::Ulong => mem::size_of::<libc::c_ulong>(),
+            &CtlType::U64 => mem::size_of::<u64>(),
+            &CtlType::U8 => mem::size_of::<u8>(),
+            &CtlType::U16 => mem::size_of::<u16>(),
+            &CtlType::S8 => mem::size_of::<i8>(),
+            &CtlType::S16 => mem::size_of::<i16>(),
+            &CtlType::S32 => mem::size_of::<i32>(),
+            &CtlType::U32 => mem::size_of::<u32>(),
+            // Added custom types below
+            #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "linux"))]
+            &CtlType::Temperature => 0,
         }
     }
 }
@@ -185,6 +309,7 @@ impl<'a> convert::From<&'a CtlValue> for CtlType {
 /// ```
 #[derive(Debug, PartialEq, PartialOrd)]
 pub enum CtlValue {
+    None,
     Node(Vec<u8>),
     Int(i32),
     String(String),
@@ -200,7 +325,7 @@ pub enum CtlValue {
     S16(i16),
     S32(i32),
     U32(u32),
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "linux"))]
     Temperature(Temperature),
 }
 
@@ -304,14 +429,40 @@ struct CtlInfo {
     fmt: String,
     flags: u32,
 }
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
 impl CtlInfo {
     fn is_temperature(&self) -> bool {
-        match &self.fmt[0..2] {
-            "IK" => true,
-            _ => false,
-        }
+        self.fmt.starts_with("IK")
     }
+}
+
+#[derive(Debug, Fail)]
+pub enum SysctlError {
+    #[fail(display = "no matching type for value")]
+    #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "linux"))]
+    UnknownType,
+
+    #[fail(display = "Error extracting value")]
+    ExtractionError,
+
+    #[fail(display = "IO Error: {}", _0)]
+    IoError(#[cause] io::Error),
+
+    #[fail(display = "Error parsing UTF-8 data: {}", _0)]
+    Utf8Error(#[cause] str::Utf8Error),
+
+    #[fail(display = "Value is not readable")]
+    NoReadAccess,
+
+    #[fail(display = "Value is not writeable")]
+    NoWriteAccess,
+
+    #[fail(
+        display = "sysctl returned a short read: read {} bytes, while a size of {} was reported",
+        read,
+        reported
+    )]
+    ShortRead { read: usize, reported: usize },
 }
 
 /// A custom type for temperature sysctls.
@@ -319,10 +470,16 @@ impl CtlInfo {
 /// # Example
 /// ```
 /// extern crate sysctl;
-/// #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+/// #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
 /// fn main() {
-///     let val_enum = sysctl::value("dev.cpu.0.temperature").unwrap();
-///     if let sysctl::CtlValue::Temperature(val) = val_enum {
+/// #   let ctl = match sysctl::Ctl::new("dev.cpu.0.temperature") {
+/// #       Ok(c) => c,
+/// #       Err(e) => {
+/// #           println!("Couldn't get dev.cpu.0.temperature: {}", e);
+/// #           return;
+/// #       }
+/// #   };
+///     if let Ok(sysctl::CtlValue::Temperature(val)) = ctl.value() {
 ///         println!("Temperature: {:.2}K, {:.2}F, {:.2}C",
 ///                  val.kelvin(),
 ///                  val.fahrenheit(),
@@ -333,12 +490,12 @@ impl CtlInfo {
 /// }
 /// ```
 /// Not available on MacOS
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "linux"))]
 #[derive(Debug, Copy, Clone, PartialEq, PartialOrd)]
 pub struct Temperature {
     value: f32, // Kelvin
 }
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "linux"))]
 impl Temperature {
     pub fn kelvin(&self) -> f32 {
         self.value
@@ -351,16 +508,8 @@ impl Temperature {
     }
 }
 
-fn errno_string() -> String {
-    let e = errno();
-    set_errno(e);
-    let code = e.0;
-    format!("errno {}: {}", code, e)
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn name2oid(name: &str) -> Result<Vec<c_int>, String> {
-
+#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+fn name2oid(name: &str) -> Result<Vec<c_int>, SysctlError> {
     // Request command for OID
     let oid: [c_int; 2] = [0, 3];
 
@@ -370,15 +519,17 @@ fn name2oid(name: &str) -> Result<Vec<c_int>, String> {
     let mut res: Vec<c_int> = vec![0; CTL_MAXNAME as usize];
 
     let ret = unsafe {
-        sysctl(oid.as_ptr(),
-               2,
-               res.as_mut_ptr() as *mut c_void,
-               &mut len,
-               name.as_ptr() as *const c_void,
-               name.len())
+        sysctl(
+            oid.as_ptr(),
+            2,
+            res.as_mut_ptr() as *mut c_void,
+            &mut len,
+            name.as_ptr() as *const c_void,
+            name.len(),
+        )
     };
     if ret < 0 {
-        return Err(errno_string());
+        return Err(SysctlError::IoError(io::Error::last_os_error()));
     }
 
     // len is in bytes, convert to number of c_ints
@@ -391,8 +542,7 @@ fn name2oid(name: &str) -> Result<Vec<c_int>, String> {
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn name2oid(name: &str) -> Result<Vec<c_int>, String> {
-
+fn name2oid(name: &str) -> Result<Vec<c_int>, SysctlError> {
     // Request command for OID
     let mut oid: [c_int; 2] = [0, 3];
 
@@ -402,15 +552,17 @@ fn name2oid(name: &str) -> Result<Vec<c_int>, String> {
     let mut res: Vec<c_int> = vec![0; CTL_MAXNAME as usize];
 
     let ret = unsafe {
-        sysctl(oid.as_mut_ptr(),
-               2,
-               res.as_mut_ptr() as *mut c_void,
-               &mut len,
-               name.as_ptr() as *mut c_void,
-               name.len())
+        sysctl(
+            oid.as_mut_ptr(),
+            2,
+            res.as_mut_ptr() as *mut c_void,
+            &mut len,
+            name.as_ptr() as *mut c_void,
+            name.len(),
+        )
     };
     if ret < 0 {
-        return Err(errno_string());
+        return Err(SysctlError::IoError(io::Error::last_os_error()));
     }
 
     // len is in bytes, convert to number of c_ints
@@ -422,9 +574,8 @@ fn name2oid(name: &str) -> Result<Vec<c_int>, String> {
     Ok(res)
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn oidfmt(oid: &[c_int]) -> Result<CtlInfo, String> {
-
+#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+fn oidfmt(oid: &[c_int]) -> Result<CtlInfo, SysctlError> {
     // Request command for type info
     let mut qoid: Vec<c_int> = vec![0, 4];
     qoid.extend(oid);
@@ -433,15 +584,17 @@ fn oidfmt(oid: &[c_int]) -> Result<CtlInfo, String> {
     let mut buf: [c_uchar; BUFSIZ as usize] = [0; BUFSIZ as usize];
     let mut buf_len = mem::size_of_val(&buf);
     let ret = unsafe {
-        sysctl(qoid.as_ptr(),
-               qoid.len() as u32,
-               buf.as_mut_ptr() as *mut c_void,
-               &mut buf_len,
-               ptr::null(),
-               0)
+        sysctl(
+            qoid.as_ptr(),
+            qoid.len() as u32,
+            buf.as_mut_ptr() as *mut c_void,
+            &mut buf_len,
+            ptr::null(),
+            0,
+        )
     };
     if ret != 0 {
-        return Err(errno_string());
+        return Err(SysctlError::IoError(io::Error::last_os_error()));
     }
 
     // 'Kind' is the first 32 bits of result buffer
@@ -453,7 +606,7 @@ fn oidfmt(oid: &[c_int]) -> Result<CtlInfo, String> {
     // 'fmt' is after 'Kind' in result buffer
     let fmt: String = match str::from_utf8(&buf[mem::size_of::<u32>()..buf_len]) {
         Ok(x) => x.to_owned(),
-        Err(e) => return Err(format!("{}", e)),
+        Err(e) => return Err(SysctlError::Utf8Error(e)),
     };
 
     let s = CtlInfo {
@@ -464,23 +617,21 @@ fn oidfmt(oid: &[c_int]) -> Result<CtlInfo, String> {
     Ok(s)
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn temperature(info: &CtlInfo, val: &Vec<u8>) -> Result<CtlValue, String> {
+#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+fn temperature(info: &CtlInfo, val: &Vec<u8>) -> Result<CtlValue, SysctlError> {
     let prec: u32 = {
         match info.fmt.len() {
-            l if l > 2 => {
-                match info.fmt[2..3].parse::<u32>() {
-                    Ok(x) if x <= 9 => x,
-                    _ => 1,
-                }
-            }
+            l if l > 2 => match info.fmt[2..3].parse::<u32>() {
+                Ok(x) if x <= 9 => x,
+                _ => 1,
+            },
             _ => 1,
         }
     };
 
     let base = 10u32.pow(prec) as f32;
 
-    let make_temp = move |f: f32| -> Result<CtlValue, String> {
+    let make_temp = move |f: f32| -> Result<CtlValue, SysctlError> {
         Ok(CtlValue::Temperature(Temperature { value: f / base }))
     };
 
@@ -497,13 +648,12 @@ fn temperature(info: &CtlInfo, val: &Vec<u8>) -> Result<CtlValue, String> {
         CtlType::S16 => make_temp(LittleEndian::read_i16(&val) as f32),
         CtlType::S32 => make_temp(LittleEndian::read_i32(&val) as f32),
         CtlType::U32 => make_temp(LittleEndian::read_u32(&val) as f32),
-        _ => Err("No matching type for value".into()),
+        _ => Err(SysctlError::UnknownType),
     }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn oidfmt(oid: &[c_int]) -> Result<CtlInfo, String> {
-
+fn oidfmt(oid: &[c_int]) -> Result<CtlInfo, SysctlError> {
     // Request command for type info
     let mut qoid: Vec<c_int> = vec![0, 4];
     qoid.extend(oid);
@@ -522,15 +672,17 @@ fn oidfmt(oid: &[c_int]) -> Result<CtlInfo, String> {
     };
     #[cfg(target_os = "macos")]
     let ret = unsafe {
-        sysctl(qoid.as_mut_ptr(),
-               qoid.len() as u32,
-               buf.as_mut_ptr() as *mut c_void,
-               &mut buf_len,
-               ptr::null_mut(),
-               0)
+        sysctl(
+            qoid.as_mut_ptr(),
+            qoid.len() as u32,
+            buf.as_mut_ptr() as *mut c_void,
+            &mut buf_len,
+            ptr::null_mut(),
+            0,
+        )
     };
     if ret != 0 {
-        return Err(errno_string());
+        return Err(SysctlError::IoError(io::Error::last_os_error()));
     }
 
     // 'Kind' is the first 32 bits of result buffer
@@ -542,7 +694,7 @@ fn oidfmt(oid: &[c_int]) -> Result<CtlInfo, String> {
     // 'fmt' is after 'Kind' in result buffer
     let fmt: String = match str::from_utf8(&buf[mem::size_of::<u32>()..buf_len]) {
         Ok(x) => x.to_owned(),
-        Err(e) => return Err(format!("{}", e)),
+        Err(e) => return Err(SysctlError::Utf8Error(e)),
     };
 
     let s = CtlInfo {
@@ -555,7 +707,7 @@ fn oidfmt(oid: &[c_int]) -> Result<CtlInfo, String> {
 
 /// Takes the name of the OID as argument and returns
 /// a result containing the sysctl value if success,
-/// the errno caused by sysctl() as string if failure.
+/// or a SysctlError on failure
 ///
 /// # Example
 /// ```
@@ -565,16 +717,28 @@ fn oidfmt(oid: &[c_int]) -> Result<CtlInfo, String> {
 ///     println!("Value: {:?}", sysctl::value("kern.osrevision"));
 /// }
 /// ```
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub fn value(name: &str) -> Result<CtlValue, String> {
+#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+pub fn value(name: &str) -> Result<CtlValue, SysctlError> {
     match name2oid(name) {
         Ok(v) => value_oid(&v),
         Err(e) => Err(e),
     }
 }
 
+/// Takes the name of the OID as argument and returns
+/// a result containing the sysctl value if success,
+/// or a SysctlError on failure
+///
+/// # Example
+/// ```
+/// extern crate sysctl;
+///
+/// fn main() {
+///     println!("Value: {:?}", sysctl::value("kern.osrevision"));
+/// }
+/// ```
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-pub fn value(name: &str) -> Result<CtlValue, String> {
+pub fn value(name: &str) -> Result<CtlValue, SysctlError> {
     match name2oid(name) {
         Ok(mut v) => value_oid(&mut v),
         Err(e) => Err(e),
@@ -582,8 +746,8 @@ pub fn value(name: &str) -> Result<CtlValue, String> {
 }
 
 /// Takes an OID as argument and returns a result
-/// containing the sysctl value if success, the errno
-/// caused by sysctl() as string if failure.
+/// containing the sysctl value if success, or a SysctlError
+/// on failure
 ///
 /// # Example
 /// ```
@@ -591,46 +755,66 @@ pub fn value(name: &str) -> Result<CtlValue, String> {
 /// extern crate libc;
 ///
 /// fn main() {
-///     let oid = vec![libc::CTL_KERN, libc::KERN_OSREV];
+///     let mut oid = vec![libc::CTL_KERN, libc::KERN_OSREV];
 ///     println!("Value: {:?}", sysctl::value_oid(&oid));
 /// }
 /// ```
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub fn value_oid(oid: &mut Vec<i32>) -> Result<CtlValue, String> {
-
+#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+pub fn value_oid(oid: &Vec<i32>) -> Result<CtlValue, SysctlError> {
     let info: CtlInfo = try!(oidfmt(&oid));
+
+    // Check if the value is readable
+    if !(info.flags & CTLFLAG_RD == CTLFLAG_RD) {
+        return Err(SysctlError::NoReadAccess);
+    }
 
     // First get size of value in bytes
     let mut val_len = 0;
     let ret = unsafe {
-        sysctl(oid.as_ptr(),
-               oid.len() as u32,
-               ptr::null_mut(),
-               &mut val_len,
-               ptr::null(),
-               0)
+        sysctl(
+            oid.as_ptr(),
+            oid.len() as u32,
+            ptr::null_mut(),
+            &mut val_len,
+            ptr::null(),
+            0,
+        )
     };
     if ret < 0 {
-        return Err(errno_string());
+        return Err(SysctlError::IoError(io::Error::last_os_error()));
     }
+
+    // If the length reported is shorter than the type we will convert it into,
+    // LittleEndian::read_* will panic. Therefore, expand the value length to at
+    // Least the size of the value.
+    let val_minsize = cmp::max(val_len, info.ctl_type.min_type_size());
 
     // Then get value
-    let mut val: Vec<c_uchar> = vec![0; val_len];
+    let mut val: Vec<c_uchar> = vec![0; val_minsize];
     let mut new_val_len = val_len;
     let ret = unsafe {
-        sysctl(oid.as_ptr(),
-               oid.len() as u32,
-               val.as_mut_ptr() as *mut c_void,
-               &mut new_val_len,
-               ptr::null(),
-               0)
+        sysctl(
+            oid.as_ptr(),
+            oid.len() as u32,
+            val.as_mut_ptr() as *mut c_void,
+            &mut new_val_len,
+            ptr::null(),
+            0,
+        )
     };
     if ret < 0 {
-        return Err(errno_string());
+        return Err(SysctlError::IoError(io::Error::last_os_error()));
     }
 
+    // Confirm that we did not read out of bounds
+    assert!(new_val_len <= val_len);
     // Confirm that we got the bytes we requested
-    assert_eq!(val_len, new_val_len);
+    if new_val_len < val_len {
+        return Err(SysctlError::ShortRead {
+            read: new_val_len,
+            reported: val_len,
+        });
+    }
 
     // Special treatment for temperature ctls.
     if info.is_temperature() {
@@ -639,15 +823,15 @@ pub fn value_oid(oid: &mut Vec<i32>) -> Result<CtlValue, String> {
 
     // Wrap in Enum and return
     match info.ctl_type {
+        CtlType::None => Ok(CtlValue::None),
         CtlType::Node => Ok(CtlValue::Node(val)),
         CtlType::Int => Ok(CtlValue::Int(LittleEndian::read_i32(&val))),
-        CtlType::String => {
-            if let Ok(s) = str::from_utf8(&val[..val.len() - 1]) {
-                Ok(CtlValue::String(s.into()))
-            } else {
-                Err("Error parsing string".into())
-            }
-        }
+        CtlType::String => match val.len() {
+            0 => Ok(CtlValue::String("".to_string())),
+            l => str::from_utf8(&val[..l - 1])
+                .map_err(|e| SysctlError::Utf8Error(e))
+                .map(|s| CtlValue::String(s.into())),
+        },
         CtlType::S64 => Ok(CtlValue::S64(LittleEndian::read_u64(&val))),
         CtlType::Struct => Ok(CtlValue::Struct(val)),
         CtlType::Uint => Ok(CtlValue::Uint(LittleEndian::read_u32(&val))),
@@ -660,14 +844,32 @@ pub fn value_oid(oid: &mut Vec<i32>) -> Result<CtlValue, String> {
         CtlType::S16 => Ok(CtlValue::S16(LittleEndian::read_i16(&val))),
         CtlType::S32 => Ok(CtlValue::S32(LittleEndian::read_i32(&val))),
         CtlType::U32 => Ok(CtlValue::U32(LittleEndian::read_u32(&val))),
-        _ => Err("No matching type for value".into()),
+        _ => Err(SysctlError::UnknownType),
     }
 }
 
+/// Takes an OID as argument and returns a result
+/// containing the sysctl value if success, or a SysctlError
+/// on failure
+///
+/// # Example
+/// ```
+/// extern crate sysctl;
+/// extern crate libc;
+///
+/// fn main() {
+///     let mut oid = vec![libc::CTL_KERN, libc::KERN_OSREV];
+///     println!("Value: {:?}", sysctl::value_oid(&mut oid));
+/// }
+/// ```
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-pub fn value_oid(oid: &mut Vec<i32>) -> Result<CtlValue, String> {
-
+pub fn value_oid(oid: &mut Vec<i32>) -> Result<CtlValue, SysctlError> {
     let info: CtlInfo = try!(oidfmt(&oid));
+
+    // Check if the value is readable
+    if !(info.flags & CTLFLAG_RD == CTLFLAG_RD) {
+        return Err(SysctlError::NoReadAccess);
+    }
 
     // First get size of value in bytes
     let mut val_len = 0;
@@ -682,19 +884,26 @@ pub fn value_oid(oid: &mut Vec<i32>) -> Result<CtlValue, String> {
     };
     #[cfg(target_os = "macos")]
     let ret = unsafe {
-        sysctl(oid.as_mut_ptr(),
-               oid.len() as u32,
-               ptr::null_mut(),
-               &mut val_len,
-               ptr::null_mut(),
-               0)
+        sysctl(
+            oid.as_mut_ptr(),
+            oid.len() as u32,
+            ptr::null_mut(),
+            &mut val_len,
+            ptr::null_mut(),
+            0,
+        )
     };
     if ret < 0 {
-        return Err(errno_string());
+        return Err(SysctlError::IoError(io::Error::last_os_error()));
     }
 
+    // If the length reported is shorter than the type we will convert it into,
+    // LittleEndian::read_* will panic. Therefore, expand the value length to at
+    // Least the size of the value.
+    let val_minsize = cmp::max(val_len, info.ctl_type.min_type_size());
+
     // Then get value
-    let mut val: Vec<c_uchar> = vec![0; val_len];
+    let mut val: Vec<c_uchar> = vec![0; val_minsize];
     let mut new_val_len = val_len;
     #[cfg(target_os = "linux")]
     let ret = unsafe {
@@ -707,31 +916,38 @@ pub fn value_oid(oid: &mut Vec<i32>) -> Result<CtlValue, String> {
     };
     #[cfg(target_os = "macos")]
     let ret = unsafe {
-        sysctl(oid.as_mut_ptr(),
-               oid.len() as u32,
-               val.as_mut_ptr() as *mut c_void,
-               &mut new_val_len,
-               ptr::null_mut(),
-               0)
+        sysctl(
+            oid.as_mut_ptr(),
+            oid.len() as u32,
+            val.as_mut_ptr() as *mut c_void,
+            &mut new_val_len,
+            ptr::null_mut(),
+            0,
+        )
     };
     if ret < 0 {
-        return Err(errno_string());
+        return Err(SysctlError::IoError(io::Error::last_os_error()));
     }
 
+    // Confirm that we did not read out of bounds
+    assert!(new_val_len <= val_len);
     // Confirm that we got the bytes we requested
-    assert_eq!(val_len, new_val_len);
+    if new_val_len < val_len {
+        return Err(SysctlError::ShortRead {
+            read: new_val_len,
+            reported: val_len,
+        });
+    }
 
     // Wrap in Enum and return
     match info.ctl_type {
+        CtlType::None => Ok(CtlValue::None),
         CtlType::Node => Ok(CtlValue::Node(val)),
         CtlType::Int => Ok(CtlValue::Int(LittleEndian::read_i32(&val))),
-        CtlType::String => {
-            if let Ok(s) = str::from_utf8(&val[..val.len() - 1]) {
-                Ok(CtlValue::String(s.into()))
-            } else {
-                Err("Error parsing string".into())
-            }
-        }
+        CtlType::String => match str::from_utf8(&val[..val.len() - 1]) {
+            Ok(s) => Ok(CtlValue::String(s.into())),
+            Err(e) => Err(SysctlError::Utf8Error(e)),
+        },
         CtlType::S64 => Ok(CtlValue::S64(LittleEndian::read_u64(&val))),
         CtlType::Struct => Ok(CtlValue::Struct(val)),
         CtlType::Uint => Ok(CtlValue::Uint(LittleEndian::read_u32(&val))),
@@ -744,14 +960,14 @@ pub fn value_oid(oid: &mut Vec<i32>) -> Result<CtlValue, String> {
         CtlType::S16 => Ok(CtlValue::S16(LittleEndian::read_i16(&val))),
         CtlType::S32 => Ok(CtlValue::S32(LittleEndian::read_i32(&val))),
         CtlType::U32 => Ok(CtlValue::U32(LittleEndian::read_u32(&val))),
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        _ => Err("No matching type for value".into()),
+        #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "linux"))]
+        _ => Err(SysctlError::UnknownType),
     }
 }
 
 /// A generic function that takes a string as argument and
 /// returns a result containing the sysctl value if success,
-/// the errno caused by sysctl() as string if failure.
+/// or a SysctlError on failure.
 ///
 /// Can only be called for sysctls of type Opaque or Struct.
 ///
@@ -776,25 +992,17 @@ pub fn value_oid(oid: &mut Vec<i32>) -> Result<CtlValue, String> {
 ///     println!("{:?}", sysctl::value_as::<ClockInfo>("kern.clockrate"));
 /// }
 /// ```
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub fn value_as<T>(name: &str) -> Result<Box<T>, String> {
+#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+pub fn value_as<T>(name: &str) -> Result<Box<T>, SysctlError> {
     match name2oid(name) {
         Ok(v) => value_oid_as::<T>(&v),
         Err(e) => Err(e),
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-pub fn value_as<T>(name: &str) -> Result<Box<T>, String> {
-    match name2oid(name) {
-        Ok(mut v) => value_oid_as::<T>(&mut v),
-        Err(e) => Err(e),
-    }
-}
-
-/// A generic function that takes an OID as argument and
+/// A generic function that takes a string as argument and
 /// returns a result containing the sysctl value if success,
-/// the errno caused by sysctl() as string if failure.
+/// or a SysctlError on failure.
 ///
 /// Can only be called for sysctls of type Opaque or Struct.
 ///
@@ -815,7 +1023,120 @@ pub fn value_as<T>(name: &str) -> Result<Box<T>, String> {
 ///     profhz: c_int, /* profiling clock frequency */
 /// }
 ///
-/// #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+/// fn main() {
+///     println!("{:?}", sysctl::value_as::<ClockInfo>("kern.clockrate"));
+/// }
+/// ```
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub fn value_as<T>(name: &str) -> Result<Box<T>, SysctlError> {
+    match name2oid(name) {
+        Ok(mut v) => value_oid_as::<T>(&mut v),
+        Err(e) => Err(e),
+    }
+}
+
+/// A generic function that takes an OID as argument and
+/// returns a result containing the sysctl value if success,
+/// or a SysctlError on failure
+///
+/// Can only be called for sysctls of type Opaque or Struct.
+///
+/// # Example
+/// ```
+/// extern crate sysctl;
+/// extern crate libc;
+///
+/// use libc::c_int;
+///
+/// #[derive(Debug)]
+/// #[repr(C)]
+/// struct ClockInfo {
+///     hz: c_int, /* clock frequency */
+///     tick: c_int, /* micro-seconds per hz tick */
+///     spare: c_int,
+///     stathz: c_int, /* statistics clock frequency */
+///     profhz: c_int, /* profiling clock frequency */
+/// }
+///
+/// #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+/// fn main() {
+///     let oid = vec![libc::CTL_KERN, libc::KERN_CLOCKRATE];
+///     println!("{:?}", sysctl::value_oid_as::<ClockInfo>(&oid));
+/// }
+/// #[cfg(any(target_os = "macos", target_os = "linux"))]
+/// fn main() {
+///     let mut oid = vec![libc::CTL_KERN, libc::KERN_CLOCKRATE];
+///     println!("{:?}", sysctl::value_oid_as::<ClockInfo>(&mut oid));
+/// }
+/// ```
+#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+pub fn value_oid_as<T>(oid: &Vec<i32>) -> Result<Box<T>, SysctlError> {
+    let val_enum = try!(value_oid(oid));
+
+    // Some structs are apparently reported as Node so this check is invalid..
+    // let ctl_type = CtlType::from(&val_enum);
+    // assert_eq!(CtlType::Struct, ctl_type, "Error type is not struct/opaque");
+
+    // TODO: refactor this when we have better clue to what's going on
+    if let CtlValue::Struct(val) = val_enum {
+        // Make sure we got correct data size
+        assert_eq!(
+            mem::size_of::<T>(),
+            val.len(),
+            "Error memory size mismatch. Size of struct {}, size of data retrieved {}.",
+            mem::size_of::<T>(),
+            val.len()
+        );
+
+        // val is Vec<u8>
+        let val_array: Box<[u8]> = val.into_boxed_slice();
+        let val_raw: *mut T = Box::into_raw(val_array) as *mut T;
+        let val_box: Box<T> = unsafe { Box::from_raw(val_raw) };
+        Ok(val_box)
+    } else if let CtlValue::Node(val) = val_enum {
+        // Make sure we got correct data size
+        assert_eq!(
+            mem::size_of::<T>(),
+            val.len(),
+            "Error memory size mismatch. Size of struct {}, size of data retrieved {}.",
+            mem::size_of::<T>(),
+            val.len()
+        );
+
+        // val is Vec<u8>
+        let val_array: Box<[u8]> = val.into_boxed_slice();
+        let val_raw: *mut T = Box::into_raw(val_array) as *mut T;
+        let val_box: Box<T> = unsafe { Box::from_raw(val_raw) };
+        Ok(val_box)
+    } else {
+        Err(SysctlError::ExtractionError)
+    }
+}
+
+/// A generic function that takes an OID as argument and
+/// returns a result containing the sysctl value if success,
+/// or a SysctlError on failure
+///
+/// Can only be called for sysctls of type Opaque or Struct.
+///
+/// # Example
+/// ```
+/// extern crate sysctl;
+/// extern crate libc;
+///
+/// use libc::c_int;
+///
+/// #[derive(Debug)]
+/// #[repr(C)]
+/// struct ClockInfo {
+///     hz: c_int, /* clock frequency */
+///     tick: c_int, /* micro-seconds per hz tick */
+///     spare: c_int,
+///     stathz: c_int, /* statistics clock frequency */
+///     profhz: c_int, /* profiling clock frequency */
+/// }
+///
+/// #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
 /// fn main() {
 ///     let oid = vec![libc::CTL_KERN, libc::KERN_CLOCKRATE];
 ///     println!("{:?}", sysctl::value_oid_as::<ClockInfo>(&oid));
@@ -826,8 +1147,8 @@ pub fn value_as<T>(name: &str) -> Result<Box<T>, String> {
 ///     println!("{:?}", sysctl::value_oid_as::<ClockInfo>(&mut oid));
 /// }
 /// ```
-pub fn value_oid_as<T>(oid: &mut Vec<i32>) -> Result<Box<T>, String> {
-
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub fn value_oid_as<T>(oid: &mut Vec<i32>) -> Result<Box<T>, SysctlError> {
     let val_enum = try!(value_oid(oid));
 
     // Some structs are apparently reported as Node so this check is invalid..
@@ -837,11 +1158,13 @@ pub fn value_oid_as<T>(oid: &mut Vec<i32>) -> Result<Box<T>, String> {
     // TODO: refactor this when we have better clue to what's going on
     if let CtlValue::Struct(val) = val_enum {
         // Make sure we got correct data size
-        assert_eq!(mem::size_of::<T>(),
-                   val.len(),
-                   "Error memory size mismatch. Size of struct {}, size of data retrieved {}.",
-                   mem::size_of::<T>(),
-                   val.len());
+        assert_eq!(
+            mem::size_of::<T>(),
+            val.len(),
+            "Error memory size mismatch. Size of struct {}, size of data retrieved {}.",
+            mem::size_of::<T>(),
+            val.len()
+        );
 
         // val is Vec<u8>
         let val_array: Box<[u8]> = val.into_boxed_slice();
@@ -850,11 +1173,13 @@ pub fn value_oid_as<T>(oid: &mut Vec<i32>) -> Result<Box<T>, String> {
         Ok(val_box)
     } else if let CtlValue::Node(val) = val_enum {
         // Make sure we got correct data size
-        assert_eq!(mem::size_of::<T>(),
-                   val.len(),
-                   "Error memory size mismatch. Size of struct {}, size of data retrieved {}.",
-                   mem::size_of::<T>(),
-                   val.len());
+        assert_eq!(
+            mem::size_of::<T>(),
+            val.len(),
+            "Error memory size mismatch. Size of struct {}, size of data retrieved {}.",
+            mem::size_of::<T>(),
+            val.len()
+        );
 
         // val is Vec<u8>
         let val_array: Box<[u8]> = val.into_boxed_slice();
@@ -862,34 +1187,64 @@ pub fn value_oid_as<T>(oid: &mut Vec<i32>) -> Result<Box<T>, String> {
         let val_box: Box<T> = unsafe { Box::from_raw(val_raw) };
         Ok(val_box)
     } else {
-        Err("Error extracting value".into())
+        Err(SysctlError::ExtractionError)
     }
 }
 
 /// Sets the value of a sysctl.
-/// Fetches and returns the new value if successful, errno string if failure.
+/// Fetches and returns the new value if successful, or a SysctlError
+/// on failure
 ///
 /// # Example
 /// ```
 /// extern crate sysctl;
 ///
 /// fn main() {
+/// #   let old_value = sysctl::value("hw.usb.debug").unwrap();
+///     println!("{:?}", sysctl::set_value("hw.usb.debug", sysctl::CtlValue::Int(1)));
+/// #   // restore old value
+/// #   sysctl::set_value("hw.usb.debug", old_value);
+/// }
+/// ```
+#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+pub fn set_value(name: &str, value: CtlValue) -> Result<CtlValue, SysctlError> {
+    let oid = try!(name2oid(name));
+    set_oid_value(&oid, value)
+}
+
+/// Sets the value of a sysctl.
+/// Fetches and returns the new value if successful, or a SysctlError
+/// on failure
+///
+/// # Example
+/// ```ignore
+/// extern crate sysctl;
+///
+/// fn main() {
 ///     println!("{:?}", sysctl::set_value("hw.usb.debug", sysctl::CtlValue::Int(1)));
 /// }
 /// ```
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub fn set_value(name: &str, value: CtlValue) -> Result<CtlValue, String> {
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub fn set_value(name: &str, value: CtlValue) -> Result<CtlValue, SysctlError> {
+    let mut oid = try!(name2oid(name));
+    set_oid_value(&mut oid, value)
+}
 
-    let oid = try!(name2oid(name));
+#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+pub fn set_oid_value(oid: &Vec<c_int>, value: CtlValue) -> Result<CtlValue, SysctlError> {
     let info: CtlInfo = try!(oidfmt(&oid));
 
-    let ctl_type = CtlType::from(&value);
-    assert_eq!(info.ctl_type,
-               ctl_type,
-               "Error type mismatch. Type given {:?}, sysctl type: {:?}",
-               ctl_type,
-               info.ctl_type);
+    // Check if the value is writeable
+    if !(info.flags & CTLFLAG_WR == CTLFLAG_WR) {
+        return Err(SysctlError::NoWriteAccess);
+    }
 
+    let ctl_type = CtlType::from(&value);
+    assert_eq!(
+        info.ctl_type, ctl_type,
+        "Error type mismatch. Type given {:?}, sysctl type: {:?}",
+        ctl_type, info.ctl_type
+    );
 
     // TODO rest of the types
 
@@ -901,35 +1256,39 @@ pub fn set_value(name: &str, value: CtlValue) -> Result<CtlValue, String> {
 
         // Set value
         let ret = unsafe {
-            sysctl(oid.as_ptr(),
-                   oid.len() as u32,
-                   ptr::null_mut(),
-                   ptr::null_mut(),
-                   bytes.as_ptr() as *const c_void,
-                   bytes.len())
+            sysctl(
+                oid.as_ptr(),
+                oid.len() as u32,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                bytes.as_ptr() as *const c_void,
+                bytes.len(),
+            )
         };
         if ret < 0 {
-            return Err(errno_string());
+            return Err(SysctlError::IoError(io::Error::last_os_error()));
         }
     }
 
     // Get the new value and return for confirmation
-    self::value(name)
+    self::value_oid(oid)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-pub fn set_value(name: &str, value: CtlValue) -> Result<CtlValue, String> {
-
-    let mut oid = try!(name2oid(name));
+pub fn set_oid_value(oid: &mut Vec<c_int>, value: CtlValue) -> Result<CtlValue, SysctlError> {
     let info: CtlInfo = try!(oidfmt(&oid));
 
-    let ctl_type = CtlType::from(&value);
-    assert_eq!(info.ctl_type,
-               ctl_type,
-               "Error type mismatch. Type given {:?}, sysctl type: {:?}",
-               ctl_type,
-               info.ctl_type);
+    // Check if the value is writeable
+    if !(info.flags & CTLFLAG_WR == CTLFLAG_WR) {
+        return Err(SysctlError::NoWriteAccess);
+    }
 
+    let ctl_type = CtlType::from(&value);
+    assert_eq!(
+        info.ctl_type, ctl_type,
+        "Error type mismatch. Type given {:?}, sysctl type: {:?}",
+        ctl_type, info.ctl_type
+    );
 
     // TODO rest of the types
 
@@ -951,24 +1310,26 @@ pub fn set_value(name: &str, value: CtlValue) -> Result<CtlValue, String> {
         };
         #[cfg(target_os = "macos")]
         let ret = unsafe {
-            sysctl(oid.as_mut_ptr(),
-                   oid.len() as u32,
-                   ptr::null_mut(),
-                   ptr::null_mut(),
-                   bytes.as_ptr() as *mut c_void,
-                   bytes.len())
+            sysctl(
+                oid.as_mut_ptr(),
+                oid.len() as u32,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                bytes.as_ptr() as *mut c_void,
+                bytes.len(),
+            )
         };
         if ret < 0 {
-            return Err(errno_string());
+            return Err(SysctlError::IoError(io::Error::last_os_error()));
         }
     }
 
     // Get the new value and return for confirmation
-    self::value(name)
+    self::value_oid(oid)
 }
 
 /// Returns a result containing the sysctl description if success,
-/// the errno caused by sysctl() as string if failure.
+/// or a SysctlError on failure.
 ///
 /// # Example
 /// ```
@@ -978,11 +1339,14 @@ pub fn set_value(name: &str, value: CtlValue) -> Result<CtlValue, String> {
 ///     println!("Description: {:?}", sysctl::description("kern.osrevision"));
 /// }
 /// ```
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub fn description(name: &str) -> Result<String, String> {
-
+#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+pub fn description(name: &str) -> Result<String, SysctlError> {
     let oid: Vec<c_int> = try!(name2oid(name));
+    oid2description(&oid)
+}
 
+#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "linux"))]
+fn oid2description(oid: &Vec<c_int>) -> Result<String, SysctlError> {
     // Request command for description
     let mut qoid: Vec<c_int> = vec![0, 5];
     qoid.extend(oid);
@@ -990,22 +1354,38 @@ pub fn description(name: &str) -> Result<String, String> {
     // Store results in u8 array
     let mut buf: [c_uchar; BUFSIZ as usize] = [0; BUFSIZ as usize];
     let mut buf_len = mem::size_of_val(&buf);
+    #[cfg(target_os = "linux")]  
+        let qoid_ptr = qoid.as_mut_ptr();
+    #[cfg(target_os = "linux")]  
+        let null_ptr = ptr::null_mut();
+    #[cfg(target_os = "linux")]  
+        let qoid_len = qoid.len() as i32;
+    
+    #[cfg(not(target_os = "linux"))] 
+        let qoid_ptr = qoid.as_ptr();
+    #[cfg(not(target_os = "linux"))] 
+        let qoid_len = qoid.len() as u32;
+    #[cfg(not(target_os = "linux"))] 
+        let null_ptr = ptr::null();
+    
     let ret = unsafe {
-        sysctl(qoid.as_ptr(),
-               qoid.len() as u32,
-               buf.as_mut_ptr() as *mut c_void,
-               &mut buf_len,
-               ptr::null(),
-               0)
+        sysctl(
+            qoid_ptr,
+            qoid_len,
+            buf.as_mut_ptr() as *mut c_void,
+            &mut buf_len,
+            null_ptr,
+            0,
+        )
     };
     if ret != 0 {
-        return Err(errno_string());
+        return Err(SysctlError::IoError(io::Error::last_os_error()));
     }
 
     // Use buf_len - 1 so that we remove the trailing NULL
     match str::from_utf8(&buf[..buf_len - 1]) {
         Ok(s) => Ok(s.to_owned()),
-        Err(e) => Err(format!("{}", e)),
+        Err(e) => Err(SysctlError::Utf8Error(e)),
     }
 }
 //NOT WORKING ON MacOS
@@ -1040,22 +1420,517 @@ pub fn description(name: &str) -> Result<String, String> {
 //     }
 // }
 
+#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+fn oid2name(oid: &Vec<c_int>) -> Result<String, SysctlError> {
+    // Request command for name
+    let mut qoid: Vec<c_int> = vec![0, 1];
+    qoid.extend(oid);
+
+    // Store results in u8 array
+    let mut buf: [c_uchar; BUFSIZ as usize] = [0; BUFSIZ as usize];
+    let mut buf_len = mem::size_of_val(&buf);
+    let ret = unsafe {
+        sysctl(
+            qoid.as_ptr(),
+            qoid.len() as u32,
+            buf.as_mut_ptr() as *mut c_void,
+            &mut buf_len,
+            ptr::null(),
+            0,
+        )
+    };
+    if ret != 0 {
+        return Err(SysctlError::IoError(io::Error::last_os_error()));
+    }
+
+    // Use buf_len - 1 so that we remove the trailing NULL
+    match str::from_utf8(&buf[..buf_len - 1]) {
+        Ok(s) => Ok(s.to_owned()),
+        Err(e) => Err(SysctlError::Utf8Error(e)),
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn oid2name(oid: &Vec<c_int>) -> Result<String, SysctlError> {
+    // Request command for name
+    let mut qoid: Vec<c_int> = vec![0, 1];
+    qoid.extend(oid);
+
+    // Store results in u8 array
+    let mut buf: [c_uchar; BUFSIZ as usize] = [0; BUFSIZ as usize];
+    let mut buf_len = mem::size_of_val(&buf);
+    #[cfg(target_os = "macos")]
+    let m_qoid_len: u32 = qoid.len() as u32;
+    #[cfg(target_os = "linux")]
+    let m_qoid_len: i32 = qoid.len()as i32;
+    let ret = unsafe {
+        sysctl(
+            qoid.as_mut_ptr(),
+            m_qoid_len,
+            buf.as_mut_ptr() as *mut c_void,
+            &mut buf_len,
+            ptr::null_mut(),
+            0,
+        )
+    };
+    if ret != 0 {
+        return Err(SysctlError::IoError(io::Error::last_os_error()));
+    }
+
+    // Use buf_len - 1 so that we remove the trailing NULL
+    match str::from_utf8(&buf[..buf_len - 1]) {
+        Ok(s) => Ok(s.to_owned()),
+        Err(e) => Err(SysctlError::Utf8Error(e)),
+    }
+}
+
+/// Get the next OID.
+#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+pub fn next_oid(oid: &Vec<c_int>) -> Result<Option<Vec<c_int>>, SysctlError> {
+    // Request command for next oid
+    let mut qoid: Vec<c_int> = vec![0, 2];
+    qoid.extend(oid);
+
+    let mut len: usize = CTL_MAXNAME as usize * mem::size_of::<c_int>();
+
+    // We get results in this vector
+    let mut res: Vec<c_int> = vec![0; CTL_MAXNAME as usize];
+
+    let ret = unsafe {
+        sysctl(
+            qoid.as_ptr(),
+            qoid.len() as u32,
+            res.as_mut_ptr() as *mut c_void,
+            &mut len,
+            ptr::null(),
+            0,
+        )
+    };
+    if ret != 0 {
+        let e = io::Error::last_os_error();
+
+        if e.raw_os_error() == Some(libc::ENOENT) {
+            return Ok(None);
+        }
+        return Err(SysctlError::IoError(e));
+    }
+
+    // len is in bytes, convert to number of c_ints
+    len /= mem::size_of::<c_int>();
+
+    // Trim result vector
+    res.truncate(len);
+
+    Ok(Some(res))
+}
+
+/// Get the next OID.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub fn next_oid(oid: &Vec<c_int>) -> Result<Option<Vec<c_int>>, SysctlError> {
+    // Request command for next oid
+    let mut qoid: Vec<c_int> = vec![0, 2];
+    qoid.extend(oid);
+
+    let mut len: usize = CTL_MAXNAME as usize * mem::size_of::<c_int>();
+
+    // We get results in this vector
+    let mut res: Vec<c_int> = vec![0; CTL_MAXNAME as usize];
+    #[cfg(target_os = "macos")]
+    let m_qoid_len: u32 = qoid.len() as u32;
+    #[cfg(target_os = "linux")]
+    let m_qoid_len: i32 = qoid.len()as i32;
+    let ret = unsafe {
+        sysctl(
+            qoid.as_mut_ptr(),
+            m_qoid_len,
+            res.as_mut_ptr() as *mut c_void,
+            &mut len,
+            ptr::null_mut(),
+            0,
+        )
+    };
+    if ret != 0 {
+        let e = io::Error::last_os_error();
+
+        if e.raw_os_error() == Some(libc::ENOENT) {
+            return Ok(None);
+        }
+        return Err(SysctlError::IoError(e));
+    }
+
+    // len is in bytes, convert to number of c_ints
+    len /= mem::size_of::<c_int>();
+
+    // Trim result vector
+    res.truncate(len);
+
+    Ok(Some(res))
+}
+
+/// This struct represents a system control.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ctl {
+    pub oid: Vec<c_int>,
+}
+
+impl FromStr for Ctl {
+    type Err = SysctlError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let oid = name2oid(s)?;
+
+        Ok(Ctl { oid })
+    }
+}
+
+impl Ctl {
+    /// Construct a Ctl from the name.
+    ///
+    /// This is just a wrapper around `Ctl::from_str`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// extern crate sysctl;
+    /// use sysctl::Ctl;
+    ///
+    /// let ctl = Ctl::new("kern.osrelease");
+    /// ```
+    pub fn new(name: &str) -> Result<Self, SysctlError> {
+        Ctl::from_str(name)
+    }
+
+    /// Returns a result containing the sysctl name on success, or a
+    /// SysctlError on failure.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # extern crate sysctl;
+    /// # use sysctl::Ctl;
+    /// let ctl = Ctl::new("kern.osrelease").expect("could not get sysctl");
+    /// assert_eq!(ctl.name().expect("could not get name"), "kern.osrelease");
+    /// ```
+    pub fn name(self: &Self) -> Result<String, SysctlError> {
+        oid2name(&self.oid)
+    }
+
+    /// Returns a result containing the sysctl value type on success,
+    /// or a Sysctl Error on failure.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # extern crate sysctl;
+    /// # use sysctl::{Ctl, CtlType};
+    /// let ctl = Ctl::new("kern.osrelease")
+    ///     .expect("Could not get kern.osrelease sysctl");
+    /// let value_type = ctl.value_type()
+    ///         .expect("Could not get kern.osrelease value type");
+    /// assert_eq!(value_type, CtlType::String);
+    /// ```
+    pub fn value_type(self: &Self) -> Result<CtlType, SysctlError> {
+        let info = oidfmt(&self.oid)?;
+        Ok(info.ctl_type)
+    }
+
+    /// Returns a result containing the sysctl description if success, or an
+    /// Error on failure.
+    ///
+    /// # Example
+    /// ```
+    /// extern crate sysctl;
+    /// use sysctl::Ctl;
+    ///
+    /// fn main() {
+    ///     let osrevision = sysctl::Ctl::new("kern.osrevision")
+    ///         .expect("could not get kern.osrevision sysctl");
+    ///     println!("Description: {:?}", osrevision.description())
+    /// }
+    /// ```
+    #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "linux"))]
+    pub fn description(self: &Self) -> Result<String, SysctlError> {
+        oid2description(&self.oid)
+    }
+
+    /// Returns a result containing the sysctl value on success, or a
+    /// SysctlError on failure.
+    ///
+    /// # Example
+    /// ```
+    /// extern crate sysctl;
+    /// extern crate libc;
+    ///
+    /// fn main() {
+    ///     let osrevision = sysctl::Ctl::new("kern.osrevision")
+    ///         .expect("could not get kern.osrevisio sysctl");
+    ///     println!("Value: {:?}", osrevision.value());
+    /// }
+    /// ```
+    #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+    pub fn value(self: &Self) -> Result<CtlValue, SysctlError> {
+        value_oid(&self.oid)
+    }
+
+    /// Returns a result containing the sysctl value on success, or a
+    /// SysctlError on failure.
+    ///
+    /// # Example
+    /// ```
+    /// extern crate sysctl;
+    /// extern crate libc;
+    ///
+    /// fn main() {
+    ///     let osrevision = sysctl::Ctl::new("kern.osrevision")
+    ///         .expect("could not get kern.osrevisio sysctl");
+    ///     println!("Value: {:?}", osrevision.value());
+    /// }
+    /// ```
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub fn value(self: &Self) -> Result<CtlValue, SysctlError> {
+        let mut oid = self.oid.clone();
+        value_oid(&mut oid)
+    }
+
+    /// A generic method that takes returns a result containing the sysctl
+    /// value if success, or a SysctlError on failure.
+    ///
+    /// May only be called for sysctls of type Opaque or Struct.
+    /// # Example
+    /// ```
+    /// extern crate sysctl;
+    /// extern crate libc;
+    ///
+    /// use libc::c_int;
+    ///
+    /// #[derive(Debug)]
+    /// #[repr(C)]
+    /// struct ClockInfo {
+    ///     hz: c_int, /* clock frequency */
+    ///     tick: c_int, /* micro-seconds per hz tick */
+    ///     spare: c_int,
+    ///     stathz: c_int, /* statistics clock frequency */
+    ///     profhz: c_int, /* profiling clock frequency */
+    /// }
+    ///
+    /// fn main() {
+    ///     let clockrate = sysctl::Ctl::new("kern.clockrate")
+    ///         .expect("could not get clockrate sysctl");
+    ///     println!("{:?}", clockrate.value_as::<ClockInfo>());
+    /// }
+    /// ```
+    #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+    pub fn value_as<T>(self: &Self) -> Result<Box<T>, SysctlError> {
+        value_oid_as::<T>(&self.oid)
+    }
+
+    /// A generic method that takes returns a result containing the sysctl
+    /// value if success, or a SysctlError on failure.
+    ///
+    /// May only be called for sysctls of type Opaque or Struct.
+    /// # Example
+    /// ```
+    /// extern crate sysctl;
+    /// extern crate libc;
+    ///
+    /// use libc::c_int;
+    ///
+    /// #[derive(Debug)]
+    /// #[repr(C)]
+    /// struct ClockInfo {
+    ///     hz: c_int, /* clock frequency */
+    ///     tick: c_int, /* micro-seconds per hz tick */
+    ///     spare: c_int,
+    ///     stathz: c_int, /* statistics clock frequency */
+    ///     profhz: c_int, /* profiling clock frequency */
+    /// }
+    ///
+    /// fn main() {
+    ///     let clockrate = sysctl::Ctl::new("kern.clockrate")
+    ///         .expect("could not get clockrate sysctl");
+    ///     println!("{:?}", clockrate.value_as::<ClockInfo>());
+    /// }
+    /// ```
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub fn value_as<T>(self: &Self) -> Result<Box<T>, SysctlError> {
+        let mut oid = self.oid.clone();
+        value_oid_as::<T>(&mut oid)
+    }
+
+    /// Sets the value of a sysctl.
+    /// Fetches and returns the new value if successful, or returns a
+    /// SysctlError on failure.
+    /// # Example
+    /// ```
+    /// extern crate sysctl;
+    /// use sysctl::Ctl;
+    ///
+    /// fn main() {
+    ///     let usbdebug = Ctl::new("hw.usb.debug")
+    ///         .expect("could not get hw.usb.debug control");
+    /// #   let original = usbdebug.value()
+    /// #       .expect("could not get value");
+    ///     let set = usbdebug.set_value(sysctl::CtlValue::Int(1));
+    ///     println!("hw.usb.debug: -> {:?}", set);
+    /// #   usbdebug.set_value(original).unwrap();
+    /// }
+    #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+    pub fn set_value(self: &Self, value: CtlValue) -> Result<CtlValue, SysctlError> {
+        set_oid_value(&self.oid, value)
+    }
+
+    /// Sets the value of a sysctl.
+    /// Fetches and returns the new value if successful, or returns a
+    /// SysctlError on failure.
+    /// # Example
+    /// ```ignore
+    /// extern crate sysctl;
+    /// use sysctl::Ctl;
+    ///
+    /// fn main() {
+    ///     let usbdebug = Ctl::new("hw.usb.debug")
+    ///         .expect("could not get hw.usb.debug control");
+    /// #   let original = usbdebug.value()
+    /// #       .expect("could not get value");
+    ///     let set = usbdebug.set_value(sysctl::CtlValue::Int(1));
+    ///     println!("hw.usb.debug: -> {:?}", set);
+    /// #   usbdebug.set_value(original).unwrap();
+    /// }
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub fn set_value(self: &Self, value: CtlValue) -> Result<CtlValue, SysctlError> {
+        let mut oid = self.oid.clone();
+        set_oid_value(&mut oid, value)
+    }
+
+    /// Get the flags for a sysctl.
+    ///
+    /// Returns a Result containing the flags on success,
+    /// or a SysctlError on failure.
+    ///
+    /// # Example
+    /// ```
+    /// extern crate sysctl;
+    /// use sysctl::{Ctl, CtlFlags};
+    ///
+    /// fn main() {
+    ///     let osrev = Ctl::new("kern.osrevision")
+    ///         .expect("could not get control");
+    ///
+    ///     let readable = osrev.flags()
+    ///         .expect("could not get flags")
+    ///         .contains(CtlFlags::RD);
+    ///
+    ///     assert!(readable);
+    /// }
+    /// ```
+    pub fn flags(self: &Self) -> Result<CtlFlags, SysctlError> {
+        let info: CtlInfo = oidfmt(&self.oid)?;
+        Ok(CtlFlags::from_bits_truncate(info.flags))
+    }
+}
+
+/// An iterator over Sysctl entries.
+pub struct CtlIter {
+    // if we are iterating over a Node, only include OIDs
+    // starting with this base. Set to None if iterating over all
+    // OIDs.
+    base: Ctl,
+    current: Ctl,
+}
+
+impl CtlIter {
+    /// Return an iterator over the complete sysctl tree.
+    pub fn root() -> Self {
+        CtlIter {
+            base: Ctl { oid: vec![] },
+            current: Ctl { oid: vec![1] },
+        }
+    }
+
+    /// Return an iterator over all sysctl entries below the given node.
+    pub fn below(node: Ctl) -> Self {
+        CtlIter {
+            base: node.clone(),
+            current: node,
+        }
+    }
+}
+
+impl Iterator for CtlIter {
+    type Item = Result<Ctl, SysctlError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let oid = match next_oid(&self.current.oid) {
+            Ok(Some(o)) => o,
+            Err(e) => return Some(Err(e)),
+            Ok(None) => return None,
+        };
+
+        // We continue iterating as long as the oid starts with the base
+        let cont = oid.starts_with(&self.base.oid);
+
+        self.current = Ctl { oid };
+
+        match cont {
+            true => Some(Ok(self.current.clone())),
+            false => None,
+        }
+    }
+}
+
+/// Ctl implements the IntoIterator trait to allow for easy iteration
+/// over nodes.
+///
+/// # Example
+///
+/// ```
+/// extern crate sysctl;
+/// use sysctl::Ctl;
+///
+/// let kern = Ctl::new("kern");
+/// for ctl in kern {
+///     let name = ctl.name().expect("could not get name");
+///     println!("{}", name);
+/// }
+/// ```
+impl IntoIterator for Ctl {
+    type Item = Result<Ctl, SysctlError>;
+    type IntoIter = CtlIter;
+
+    fn into_iter(self: Self) -> Self::IntoIter {
+        CtlIter::below(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
-    // use ::*;
-    // use libc::*;
     use super::*;
     use std::process::Command;
 
     #[test]
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
     fn ctl_mib() {
         let oid = name2oid("kern.proc.pid").unwrap();
         assert_eq!(oid.len(), 3);
-        assert_eq!(oid[0], CTL_KERN);
-        assert_eq!(oid[1], KERN_PROC);
-        assert_eq!(oid[2], KERN_PROC_PID);
+        assert_eq!(oid[0], libc::CTL_KERN);
+        assert_eq!(oid[1], libc::KERN_PROC);
+        assert_eq!(oid[2], libc::KERN_PROC_PID);
+    }
+
+    #[test]
+    #[cfg(not(target_os = "linux"))] //libc have no KERN_OSREV prop on linux...
+    fn ctl_name() {
+        let oid = vec![libc::CTL_KERN, libc::KERN_OSREV];
+        let name = oid2name(&oid).expect("Could not get name of kern.osrevision sysctl.");
+
+        assert_eq!(name, "kern.osrevision");
+
+        let ctl = Ctl { oid };
+        let name = ctl
+            .name()
+            .expect("Could not get name of kern.osrevision sysctl.");
+        assert_eq!(name, "kern.osrevision");
     }
 
     #[test]
@@ -1063,14 +1938,27 @@ mod tests {
         let oid = name2oid("kern").unwrap();
         let fmt = oidfmt(&oid).unwrap();
         assert_eq!(fmt.ctl_type, CtlType::Node);
+        let kern = Ctl::new("kern").expect("Could not get kern node");
+        let value_type = kern.value_type().expect("Could not get kern value type");
+        assert_eq!(value_type, CtlType::Node);
 
         let oid = name2oid("kern.osrelease").unwrap();
         let fmt = oidfmt(&oid).unwrap();
         assert_eq!(fmt.ctl_type, CtlType::String);
+        let osrelease = Ctl::new("kern.osrelease").expect("Could not get kern.osrelease sysctl");
+        let value_type = osrelease
+            .value_type()
+            .expect("Could notget kern.osrelease value type");
+        assert_eq!(value_type, CtlType::String);
 
         let oid = name2oid("kern.osrevision").unwrap();
         let fmt = oidfmt(&oid).unwrap();
         assert_eq!(fmt.ctl_type, CtlType::Int);
+        let osrevision = Ctl::new("kern.osrevision").expect("Could not get kern.osrevision sysctl");
+        let value_type = osrevision
+            .value_type()
+            .expect("Could notget kern.osrevision value type");
+        assert_eq!(value_type, CtlType::Int);
     }
 
     #[test]
@@ -1092,6 +1980,14 @@ mod tests {
         let rev_str = String::from_utf8_lossy(&output.stdout);
         let rev = rev_str.trim().parse::<i32>().unwrap();
         let n = match value("kern.osrevision") {
+            Ok(CtlValue::Int(n)) => n,
+            Ok(_) => 0,
+            Err(_) => 0,
+        };
+        assert_eq!(n, rev);
+
+        let ctl = Ctl::new("kern.osrevision").expect("Could not get kern.osrevision sysctl.");
+        let n = match ctl.value() {
             Ok(CtlValue::Int(n)) => n,
             Ok(_) => 0,
             Err(_) => 0,
@@ -1130,6 +2026,13 @@ mod tests {
             _ => "...".into(),
         };
         assert_eq!(s.trim(), ver.trim());
+
+        let kernversion = Ctl::new("kern.version").unwrap();
+        let s = match kernversion.value() {
+            Ok(CtlValue::String(s)) => s,
+            _ => "...".into(),
+        };
+        assert_eq!(s.trim(), ver.trim());
     }
 
     #[test]
@@ -1139,7 +2042,14 @@ mod tests {
             Ok(s) => s,
             _ => "...".into(),
         };
-        assert_eq!(s, "8");
+        assert_ne!(s, "0");
+
+        let ncpu = Ctl::new("hw.ncpu").expect("could not get hw.ncpu sysctl.");
+        let s: String = match ncpu.description() {
+            Ok(s) => s,
+            _ => "...".into(),
+        };
+        assert_ne!(s, "0");
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -1184,5 +2094,94 @@ mod tests {
         } else {
             assert!(false);
         }
+    }
+
+    #[test]
+    fn ctl_iterate_all() {
+        let root = CtlIter::root();
+
+        let all_ctls = root.into_iter().filter_map(Result::ok);
+
+        for ctl in all_ctls {
+            println!("{:?}", ctl.name());
+        }
+    }
+
+    #[test]
+    fn ctl_iterate() {
+        let output = Command::new("sysctl")
+            .arg("security")
+            .output()
+            .expect("failed to execute process");
+        let expected = String::from_utf8_lossy(&output.stdout);
+
+        let security = Ctl::new("security").expect("could not get security node");
+
+        let ctls = CtlIter::below(security);
+        let mut actual: Vec<String> = vec!["".to_string()];
+
+        for ctl in ctls {
+            let ctl = match ctl {
+                Err(_) => {
+                    continue;
+                }
+                Ok(s) => s,
+            };
+
+            let name = match ctl.name() {
+                Ok(s) => s,
+                Err(_) => {
+                    continue;
+                }
+            };
+
+            let value = match ctl.value() {
+                Ok(s) => s,
+                Err(_) => {
+                    continue;
+                }
+            };
+
+            let formatted = match value {
+                CtlValue::None => "(none)".to_owned(),
+                CtlValue::Int(i) => format!("{}", i),
+                CtlValue::Uint(i) => format!("{}", i),
+                CtlValue::Long(i) => format!("{}", i),
+                CtlValue::Ulong(i) => format!("{}", i),
+                CtlValue::U8(i) => format!("{}", i),
+                CtlValue::U16(i) => format!("{}", i),
+                CtlValue::U32(i) => format!("{}", i),
+                CtlValue::U64(i) => format!("{}", i),
+                CtlValue::S8(i) => format!("{}", i),
+                CtlValue::S16(i) => format!("{}", i),
+                CtlValue::S32(i) => format!("{}", i),
+                CtlValue::S64(i) => format!("{}", i),
+                CtlValue::Struct(_) => "(opaque struct)".to_owned(),
+                CtlValue::Node(_) => "(node)".to_owned(),
+                CtlValue::String(s) => s.to_owned(),
+                #[cfg(not(target_os = "macos"))]
+                CtlValue::Temperature(t) => format!("{} °C", t.celsius()),
+            };
+
+            match ctl.value_type().expect("could not get value type") {
+                CtlType::None => {
+                    continue;
+                }
+                CtlType::Struct => {
+                    continue;
+                }
+                CtlType::Node => {
+                    continue;
+                }
+                #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+                CtlType::Temperature => {
+                    continue;
+                }
+                _ => {}
+            };
+
+            actual.push(format!("{}: {}", name, formatted));
+        }
+        assert_eq!(actual.join("\n").trim(), expected.trim());
     }
 }

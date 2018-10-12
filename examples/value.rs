@@ -1,17 +1,22 @@
 extern crate sysctl;
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+
+use sysctl::{Ctl, CtlValue};
+
+#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
 fn main() {
+    let ctl = Ctl::new("kern.osrevision").expect("could not get sysctl");
 
-    let ctl = "kern.osrevision";
+    let name = ctl.name().expect("could not get name");
 
-    println!("\nRead sysctl {}", ctl);
+    println!("\nRead sysctl {}", name);
 
-    let d: String = sysctl::description(ctl).unwrap();
-    println!("Description: {:?}", d);
+    let description = ctl.description().expect("could not get description");
 
-    let val_enum = sysctl::value(ctl).unwrap();
+    println!("Description: {:?}", description);
 
-    if let sysctl::CtlValue::Int(val) = val_enum {
+    let val_enum = ctl.value().expect("could not get sysctl value");
+
+    if let CtlValue::Int(val) = val_enum {
         println!("Value: {}", val);
     }
     
@@ -28,22 +33,20 @@ fn main() {
 //MacOS value extraction
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn main() {
-    let ctl = "kern.osrevision";
+    // on macos the `name` and `newp` parameters of the sysctl(3)
+    // syscall API are not marked `const`. This means the sysctl
+    // structure has to be mutable.
+    let ctl = Ctl::new("kernel.hostname").expect("could not get sysctl");
 
-    println!("\nRead sysctl {}", ctl);
+    let name = ctl.name().expect("could not get name");
 
-    let val_enum = sysctl::value(ctl).unwrap();
+    println!("\nRead sysctl {}", name);
 
-    if let sysctl::CtlValue::Int(val) = val_enum {
+    // sysctl descriptions are not available on macos.
+
+    let val_enum = ctl.value().expect("could not get sysctl value");
+
+    if let CtlValue::Int(val) = val_enum {
         println!("Value: {}", val);
     }
-    
-    //Same output with fmt::Display
-    println!("Value: {}", val_enum);
-
-    //Get value to String
-    let val_str: String = val_enum.into();
-
-    //Same output as with fmt::Display
-    println!("String val: {}", val_str);
 }
